@@ -113,7 +113,10 @@ class AetherRouter extends EventEmitter {
     return this;
   }
 
-
+  /**
+   * Add middleware to router
+   * 
+   */
   use(...args) {
     if (args.length === 0) return this;
 
@@ -127,10 +130,10 @@ class AetherRouter extends EventEmitter {
         }
       });
       
-    
+   
       const normalizedPath = path === '/' ? '/' : path.replace(/\/+$/, '');
       
-  
+      
       const wrappedMiddlewares = middlewares.map(mw => {
         return async (ctx, next) => {
           if (normalizedPath === '/') {
@@ -139,17 +142,14 @@ class AetherRouter extends EventEmitter {
 
           const originalUrl = ctx.url;
           const originalPath = ctx.path; 
-
-       
           const escapedPath = normalizedPath.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&');
           const prefixRegex = new RegExp(`^${escapedPath}(?=/|$|\\?)`, 'i');
 
           if (prefixRegex.test(originalUrl)) {
-  
             let newUrl = originalUrl.replace(prefixRegex, '');
             if (!newUrl.startsWith('/')) newUrl = '/' + newUrl;
             
- 
+
             ctx.url = newUrl;
             try { if ('path' in ctx) ctx.path = newUrl.split('?')[0]; } catch(e) {}
             
@@ -167,6 +167,7 @@ class AetherRouter extends EventEmitter {
 
       this.middlewares.push({ path: normalizedPath, handlers: wrappedMiddlewares });
     } else {
+
       args.forEach((middleware, index) => {
         if (typeof middleware !== "function") {
           throw new TypeError(`Global middleware must be a function, got ${typeof middleware}`);
@@ -188,6 +189,7 @@ class AetherRouter extends EventEmitter {
     
     const applicableMiddlewares = [];
     
+ 
     this.middlewares.forEach(mw => {
       if (typeof mw === 'function') {
         applicableMiddlewares.push(mw);
@@ -199,6 +201,7 @@ class AetherRouter extends EventEmitter {
       }
     });
     
+   
     for (const [routeKey, route] of this.routes) {
       const [routeMethod, routePath] = routeKey.split(":");
       
@@ -223,6 +226,7 @@ class AetherRouter extends EventEmitter {
       }
     }
     
+ 
     if (applicableMiddlewares.length > 0) {
       return {
         route: null,

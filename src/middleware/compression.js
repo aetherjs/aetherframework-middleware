@@ -8,9 +8,37 @@
 import zlib from "zlib";
 
 /**
+ * Safely converts headers to a plain object for logging or processing.
+ * This prevents issues where internal Header Map structures are displayed 
+ * with numeric indices in consoles.
+ * 
+ * @param {Object|Headers} headers - The headers object to normalize.
+ * @returns {Object} - A plain key-value object.
+ */
+function normalizeHeaders(headers) {
+  if (!headers) return {};
+  
+  // If it's already a plain object, return a copy
+  if (typeof headers === 'object' && !Array.isArray(headers) && !(headers instanceof Map)) {
+    return { ...headers };
+  }
+
+  // If it's a Map or Headers object, convert to plain object
+  if (headers instanceof Map || (typeof headers.entries === 'function')) {
+    const obj = {};
+    for (const [key, value] of headers.entries()) {
+      obj[key.toLowerCase()] = value;
+    }
+    return obj;
+  }
+
+  // Fallback
+  return {};
+}
+
+/**
  * Parses a comma-separated string of MIME types into an array.
- * Falls back to a default list of common compressible text-based types if none is provided.
- *
+ * 
  * @param {string} types - Comma-separated list of content types.
  * @returns {Array<string>} - Array of trimmed content type strings.
  */
@@ -37,7 +65,7 @@ function parseCompressionTypes(types) {
 
 /**
  * Checks if a given content type should be compressed based on the allowed list.
- *
+ * 
  * @param {string} contentType - The response content type.
  * @param {Array<string>} compressibleTypes - List of compressible MIME types.
  * @returns {boolean} - True if the content type is compressible.
@@ -56,9 +84,7 @@ function shouldCompress(contentType, compressibleTypes) {
 
 /**
  * Creates the compression middleware for AetherJS.
- * Intercepts the underlying Node.js `res.end` method to compress response bodies
- * dynamically based on client Accept-Encoding headers and configured thresholds.
- *
+ * 
  * @param {Object} options - Compression configuration options.
  * @returns {Function} - The compression middleware function.
  */
@@ -79,24 +105,22 @@ function createCompressionMiddleware(options = {}) {
   };
 
   // Define default configuration values
-  // compression.js
-
   const defaults = {
+    // Only enable when explicitly set to "true"
     enabled: envConfig.enabled === "true",
-
+    
     threshold: parseInt(envConfig.threshold) || 1024,
     level: parseInt(envConfig.level) || zlib.constants.Z_DEFAULT_COMPRESSION,
     memLevel: parseInt(envConfig.memLevel) || 8,
     strategy: parseInt(envConfig.strategy) || zlib.constants.Z_DEFAULT_STRATEGY,
     chunkSize: parseInt(envConfig.chunkSize) || 16 * 1024,
     windowBits: parseInt(envConfig.windowBits) || 15,
-
+    
+    // Apply same strict boolean checking for other options
     gzip: envConfig.gzip === "true",
     deflate: envConfig.deflate === "true",
-    brotli:
-      envConfig.brotli === "true" &&
-      typeof zlib.createBrotliCompress === "function",
-
+    brotli: envConfig.brotli === "true" && typeof zlib.createBrotliCompress === "function",
+    
     types: parseCompressionTypes(envConfig.types),
     filter: (contentType) =>
       shouldCompress(contentType, parseCompressionTypes(envConfig.types)),
@@ -117,9 +141,7 @@ function createCompressionMiddleware(options = {}) {
   // Configure Brotli specific parameters
   const brotliOptions = {
     params: {
-      // Brotli quality 4 is a good default for web if level is -1 (default)
-      [zlib.constants.BROTLI_PARAM_QUALITY]:
-        config.level === -1 ? 4 : config.level,
+      [zlib.constants.BROTLI_PARAM_QUALITY]: config.level === -1 ? 4 : config.level, 
       [zlib.constants.BROTLI_PARAM_MODE]: zlib.constants.BROTLI_MODE_TEXT,
       [zlib.constants.BROTLI_PARAM_SIZE_HINT]: config.chunkSize,
     },
@@ -127,7 +149,7 @@ function createCompressionMiddleware(options = {}) {
 
   /**
    * Compresses a data buffer using the specified encoding algorithm.
-   *
+   * 
    * @param {Buffer} data - The raw data buffer to compress.
    * @param {string} encoding - The compression algorithm ('gzip', 'deflate', or 'br').
    * @returns {Promise<Buffer>} - A promise that resolves with the compressed buffer.
@@ -145,18 +167,12 @@ function createCompressionMiddleware(options = {}) {
           break;
         case "br":
           if (!config.brotli) {
-            return reject(
-              new Error(
-                "Brotli compression is not supported in this environment",
-              ),
-            );
+            return reject(new Error("Brotli compression is not supported in this environment"));
           }
           compressor = zlib.createBrotliCompress(brotliOptions);
           break;
         default:
-          return reject(
-            new Error(`Unsupported compression encoding: ${encoding}`),
-          );
+          return reject(new Error(`Unsupported compression encoding: ${encoding}`));
       }
 
       const chunks = [];
@@ -170,13 +186,12 @@ function createCompressionMiddleware(options = {}) {
   }
 
   /**
-   * The core middleware function that hooks into the response lifecycle.
-   *
+   * The core middleware function.
+   * 
    * @param {Object} context - The AetherJS execution context.
-   * @param {Object|Function} signal - The signal object or next function for pipeline flow control.
+   * @param {Object|Function} signal - The signal object or next function.
    */
   return async function compressionMiddleware(context, signal) {
-    // Safe invoker for compatible pipeline flow control
     const invokeNext = async () => {
       if (signal && typeof signal.next === "function") {
         await signal.next();
@@ -204,10 +219,10 @@ function createCompressionMiddleware(options = {}) {
     }
     res._compressionHooked = true;
 
-    // Store the original res.end method to call after compression
+    // Store the original res.end method
     const originalEnd = res.end;
 
-    // Override res.end to intercept the response body before it is sent to the client
+    // Override res.end to intercept the response body
     res.end = function (chunk, encoding, callback) {
       // If headers are already sent, stream is ended, or no chunk is provided, bypass compression
       if (res.writableEnded || res.headersSent || !chunk) {
@@ -227,7 +242,7 @@ function createCompressionMiddleware(options = {}) {
         return originalEnd.call(res, chunk, encoding, callback);
       }
 
-      // Convert the chunk to a Buffer for accurate size checking and compression
+      // Convert the chunk to a Buffer
       const bodyBuffer = Buffer.isBuffer(chunk)
         ? chunk
         : Buffer.from(chunk, typeof encoding === "string" ? encoding : "utf8");
@@ -238,14 +253,17 @@ function createCompressionMiddleware(options = {}) {
       }
 
       // Extract accepted encodings from the incoming request headers
+      // FIX: Use normalizeHeaders to ensure we get a clean string, not an object structure
       let acceptEncoding = "";
       if (context.req && context.req.headers) {
-        acceptEncoding = context.req.headers["accept-encoding"] || "";
+        // Ensure we access the header as a simple string
+        const rawHeaders = context.req.headers;
+        acceptEncoding = (rawHeaders['accept-encoding'] || rawHeaders['Accept-Encoding'] || "").toString();
       } else if (typeof context.getHeader === "function") {
-        acceptEncoding = context.getHeader("accept-encoding") || "";
+        acceptEncoding = (context.getHeader("accept-encoding") || "").toString();
       }
 
-      // Determine the best compression algorithm based on client support (Priority: Brotli > Gzip > Deflate)
+      // Determine the best compression algorithm
       let chosenEncoding = null;
       if (config.brotli && acceptEncoding.includes("br")) {
         chosenEncoding = "br";
@@ -263,10 +281,10 @@ function createCompressionMiddleware(options = {}) {
       // Perform asynchronous compression
       compressData(bodyBuffer, chosenEncoding)
         .then((compressed) => {
-          // Update response headers to reflect the compressed content
+          // Update response headers
           res.setHeader("content-encoding", chosenEncoding);
 
-          // Append 'Accept-Encoding' to the Vary header to ensure proper proxy/browser caching
+          // Append 'Accept-Encoding' to the Vary header
           const varyHeader = res.getHeader("vary");
           if (varyHeader) {
             res.setHeader("vary", `${varyHeader}, Accept-Encoding`);
@@ -274,19 +292,26 @@ function createCompressionMiddleware(options = {}) {
             res.setHeader("vary", "Accept-Encoding");
           }
 
-          // Remove content-length as the compressed size is different from the original
+          // Remove content-length as the compressed size is different
           res.removeHeader("content-length");
 
-          // Send the compressed buffer using the original end method
+          // Send the compressed buffer
           originalEnd.call(res, compressed, null, callback);
         })
         .catch((error) => {
-          // Fallback to original body if compression fails to prevent broken responses
-          console.error(
-            "[Compression] Error during compression, falling back to original body:",
-            error,
-          );
-          originalEnd.call(res, chunk, encoding, callback);
+          // Fallback to original body if compression fails
+          // FIX: Do NOT log the error object directly. Log only the message.
+          // This prevents the console from trying to serialize complex objects 
+          // which might result in the "numeric index" display you saw.
+          console.error("[Compression] Compression failed, falling back to original body.");
+          if (error && error.message) {
+             console.error("[Compression] Reason:", error.message);
+          }
+          
+          // Ensure we don't try to set headers again if they were partially sent
+          if (!res.headersSent) {
+              originalEnd.call(res, chunk, encoding, callback);
+          }
         });
     };
 
