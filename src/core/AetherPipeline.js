@@ -69,7 +69,7 @@ class ContextPool {
       ctx._inPool = false;
     }
     
-    // [FIX] Call _reset WITH arguments when ACQUIRING
+    // [PERF] Call _reset WITH arguments when ACQUIRING
     if (typeof ctx._reset === 'function') {
       ctx._reset(req, res);
     } else {
@@ -124,7 +124,7 @@ class ContextPool {
 const contextPool = new ContextPool(8192);
 
 // ==========================================
-// AETHER PIPELINE CORE
+// AETHER PIPELINE CORE - STATISTICS REMOVED
 // ==========================================
 class AetherPipeline extends EventEmitter {
   constructor() {
@@ -132,12 +132,6 @@ class AetherPipeline extends EventEmitter {
     this.middlewares = [];
     this.cache = new FastCache(2000);
     this._compiledChain = null;
-    
-    this.stats = {
-      totalRequests: 0,
-      cacheHits: 0,
-      cacheMisses: 0,
-    };
   }
 
   use(middleware) {
@@ -181,15 +175,13 @@ class AetherPipeline extends EventEmitter {
   }
 
   async handle(request, response) {
-    this.stats.totalRequests++;
     const url = request.url;
     const method = request.method;
 
-    // 1. [V8-OPT] Ultra-fast cache check
+    // 1. [V8-OPT] Ultra-fast cache check without statistics
     if (method === 'GET') {
       const cached = this.cache.get(url);
       if (cached) {
-        this.stats.cacheHits++;
         const socket = response.socket;
         if (socket && !socket.destroyed) {
            socket.cork();
@@ -201,7 +193,6 @@ class AetherPipeline extends EventEmitter {
       }
     }
     
-    this.stats.cacheMisses++;
 
     // 2. Get context from pool
     const ctx = contextPool.get(request, response);
@@ -211,9 +202,7 @@ class AetherPipeline extends EventEmitter {
       const chain = this._compileChain();
       await chain(ctx);
 
-      // 4. [CRITICAL FIX] Cache GET responses BEFORE checking writableEnded.
-      // If the router already sent the response, ctx._terminated is true,
-      // but ctx._body and ctx.statusCode still hold the data we need to cache!
+      // 4. [CRITICAL] Cache GET responses BEFORE checking writableEnded
       if (method === 'GET' && ctx.statusCode === 200 && ctx._body) {
         this._cacheResponse(url, ctx);
       }
@@ -348,15 +337,7 @@ class AetherPipeline extends EventEmitter {
     });
   }
 
-  getStats() {
-    return {
-      ...this.stats,
-      cacheSize: this.cache.size,
-      middlewareCount: this.middlewares.length,
-      poolAvailable: contextPool.index,
-      poolTotal: contextPool.pool.length
-    };
-  }
+
 
   clearCache() {
     this.cache.clear();

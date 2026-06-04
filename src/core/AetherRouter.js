@@ -3,60 +3,17 @@
  * Copyright (c) 2026-present AetherFramework Contributors.
  * SPDX-License-Identifier: MIT
  * @module @aetherframework/middleware/core/AetherRouter
+ * 
+ * Ultra-Optimized Router for Maximum Performance
+ * Focus: Pure routing speed with zero overhead
  */
 
-import { EventEmitter } from "events";
-
-// [V8-OPT] Pre-allocated frozen objects to prevent heap allocation in hot paths.
-// V8 handles frozen objects as constants, avoiding memory allocation entirely.
+// [PERF] Pre-allocated frozen objects to prevent heap allocation in hot paths
 const EMPTY_PARAMS = Object.freeze({});
 const EMPTY_QUERY = Object.freeze({});
 
 /**
- * [V8-OPT] Stateful HandlerChain for 6+ handlers.
- * Replaces deep recursive closures. V8 JIT compiles prototype methods and 
- * stateful loops much better than nested closure compositions (like Koa's compose).
- */
-class HandlerChain {
-  constructor(context, handlers) {
-    this.context = context;
-    this.handlers = handlers;
-    this.index = 0;
-    this.len = handlers.length;
-    // [V8-OPT] Bind once per request. V8 optimizes bound prototype methods heavily.
-    this.nextBound = this.next.bind(this);
-  }
-
-  async next() {
-    const ctx = this.context;
-    // [V8-OPT] Fast-path exit. Direct property access is faster than method calls.
-    if (this.index >= this.len || ctx.isTerminated()) return;
-    
-    const handler = this.handlers[this.index++];
-    try {
-      await handler(ctx, this.nextBound);
-    } catch (error) {
-      // [V8-OPT] Delegate to cold-path to prevent deoptimization of the hot loop.
-      this._handleError(error);
-    }
-  }
-
-  _handleError(error) {
-    console.error(`[AetherRouter Error]`, error);
-    const ctx = this.context;
-    if (!ctx.isTerminated()) {
-      ctx.setStatus(500).json({ 
-        success: false, 
-        error: "Internal Server Error", 
-        message: error.message 
-      });
-    }
-  }
-}
-
-/**
- * [V8-OPT] Zero-Allocation Query Parser.
- * Mimics C++ linear scanning. Avoids String.split() to prevent intermediate array creation.
+ * [PERF] Zero-Allocation Query Parser
  */
 class JITQueryParser {
   parse(search) {
@@ -78,7 +35,6 @@ class JITQueryParser {
         const key = decodeURIComponent(rawKey);
         const value = decodeURIComponent(rawValue);
         
-        // [V8-OPT] Fast array notation check without endsWith() allocation.
         const kLen = key.length;
         if (kLen > 2 && key.charCodeAt(kLen - 2) === 91 && key.charCodeAt(kLen - 1) === 93) {
           const arrayKey = key.slice(0, -2);
@@ -99,8 +55,7 @@ class JITQueryParser {
 }
 
 /**
- * [V8-OPT] Optimized Handler Executor with Unrolled Chains.
- * Replaces dynamic loops with hardcoded, V8-friendly unrolled executors for small chains.
+ * [PERF] Optimized Handler Executor with Manual Loop Unrolling
  */
 class JITHandlerExecutor {
   getExecutor(handlers) {
@@ -112,38 +67,41 @@ class JITHandlerExecutor {
     if (len === 4) return this._exec4;
     if (len === 5) return this._exec5;
     
-    // For 6+ handlers, use the stateful HandlerChain class.
     return async (context) => {
-      const chain = new HandlerChain(context, handlers);
-      await chain.next();
+      let index = 0;
+      const next = async () => {
+        if (index >= handlers.length || context.isTerminated()) return;
+        const handler = handlers[index++];
+        try {
+          await handler(context, next);
+        } catch (error) {
+          if (!context.isTerminated()) {
+            context.setStatus(500).json({ error: "Internal Server Error" });
+          }
+        }
+      };
+      await next();
     };
   }
 
-  // [V8-OPT] Cold path error handler
-  static _handleError(context, error) {
-    console.error(`[AetherRouter Error]`, error);
-    if (!context.isTerminated()) {
-      context.setStatus(500).json({ success: false, error: "Internal Server Error", message: error.message });
-    }
-  }
-
   async _exec0(ctx) {}
-
+  
+  // [FIX] 修复了 this 指向问题，this 现在是 handlers 数组
   async _exec1(ctx) {
     if (ctx.isTerminated()) return;
     try { await this[0](ctx, async () => {}); } 
-    catch (e) { JITHandlerExecutor._handleError(ctx, e); }
+    catch (e) { if (!ctx.isTerminated()) ctx.setStatus(500).json({ error: "Internal Server Error" }); }
   }
-
+  
   async _exec2(ctx) {
     if (ctx.isTerminated()) return;
     try { 
       await this[0](ctx, async () => { 
         if (!ctx.isTerminated()) await this[1](ctx, async () => {}); 
       }); 
-    } catch (e) { JITHandlerExecutor._handleError(ctx, e); }
+    } catch (e) { if (!ctx.isTerminated()) ctx.setStatus(500).json({ error: "Internal Server Error" }); }
   }
-
+  
   async _exec3(ctx) {
     if (ctx.isTerminated()) return;
     try { 
@@ -152,9 +110,9 @@ class JITHandlerExecutor {
           if (!ctx.isTerminated()) await this[2](ctx, async () => {}); 
         }); 
       }); 
-    } catch (e) { JITHandlerExecutor._handleError(ctx, e); }
+    } catch (e) { if (!ctx.isTerminated()) ctx.setStatus(500).json({ error: "Internal Server Error" }); }
   }
-
+  
   async _exec4(ctx) {
     if (ctx.isTerminated()) return;
     try { 
@@ -165,9 +123,9 @@ class JITHandlerExecutor {
           }); 
         }); 
       }); 
-    } catch (e) { JITHandlerExecutor._handleError(ctx, e); }
+    } catch (e) { if (!ctx.isTerminated()) ctx.setStatus(500).json({ error: "Internal Server Error" }); }
   }
-
+  
   async _exec5(ctx) {
     if (ctx.isTerminated()) return;
     try { 
@@ -180,41 +138,23 @@ class JITHandlerExecutor {
           }); 
         }); 
       }); 
-    } catch (e) { JITHandlerExecutor._handleError(ctx, e); }
+    } catch (e) { if (!ctx.isTerminated()) ctx.setStatus(500).json({ error: "Internal Server Error" }); }
   }
 }
 
-/**
- * AetherRouter - V8-Optimized High-Performance Router
- */
-class AetherRouter extends EventEmitter {
+class AetherRouter {
   constructor(options = {}) {
-    super();
-    
-    // [V8-OPT] Map for O(1) static route lookups. V8's C++ hash map is vastly superior to array iteration.
     this.staticRoutes = new Map(); 
-    // [V8-OPT] Flat array for dynamic routes. Iteration is required for regex matching.
     this.dynamicRoutes = []; 
-    
     this.globalMiddlewares = [];
     this.prefixMiddlewares = [];
-    
-    this.prefix = options.prefix || ""; 
-    this.version = options.version || ""; 
-    
+    this.prefix = options.prefix || "";
+    this.version = options.version || "";
     this.routeCache = new Map();
-    this.cacheMaxSize = options.cacheMaxSize || 2000; 
-    
+    this.cacheMaxSize = options.cacheMaxSize || 2000;
     this.jitQueryParser = new JITQueryParser();
     this.jitExecutor = new JITHandlerExecutor();
   }
-
-  // ==========================================
-  // [V8-OPT] PROTOTYPE-BOUND HTTP METHODS
-  // ==========================================
-  // Defining methods directly on the prototype guarantees they exist instantly,
-  // bypassing constructor execution risks. It also allows V8 to share the 
-  // function references across all instances (Monomorphic Hidden Classes).
 
   get(path, ...handlers) { return this._addRoute("GET", path, handlers); }
   post(path, ...handlers) { return this._addRoute("POST", path, handlers); }
@@ -231,7 +171,6 @@ class AetherRouter extends EventEmitter {
     const fullPath = this._buildPath(path);
     const isStatic = fullPath.indexOf(':') === -1 && fullPath.indexOf('*') === -1;
     
-    // [V8-OPT] Strict monomorphic object shape. Always initialize properties in the exact same order.
     const route = {
       method: method === "ANY" ? null : method,
       path: fullPath,
@@ -242,14 +181,10 @@ class AetherRouter extends EventEmitter {
     };
     
     if (isStatic) {
-      // [V8-OPT] O(1) insertion and lookup for static routes.
-      const key = `${route.method || 'ANY'}:${fullPath}`;
-      this.staticRoutes.set(key, route);
+      this.staticRoutes.set(`${route.method || 'ANY'}:${fullPath}`, route);
     } else {
       this.dynamicRoutes.push(route);
     }
-    
-    this.emit("route:added", { method, path: fullPath, handlers: handlers.length });
     return this;
   }
 
@@ -264,13 +199,13 @@ class AetherRouter extends EventEmitter {
   _pathToRegex(path) {
     const escapedPath = path.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&');
     const pattern = escapedPath
-      .replace(/\\:(\w+)/g, "([^/]+)") // Positional captures are faster than named captures in V8
-      .replace(/\\\*(\w+)?/g, "(.*)") 
-      .replace(/\\\$([^)]+)\\\$/g, "(?:$1)") 
-      .replace(/\\\?/g, "\\?"); 
+      .replace(/\\:(\w+)/g, "([^/]+)") 
+      .replace(/\\*(\w+)?/g, "(.*)") 
+      .replace(/\\\?/g, "\\?");
     return new RegExp(`^${pattern}$`);
   }
 
+  // [FIX] 修复了 push(match) 导致推入整个 RegExp 数组的问题
   _extractParamNames(path) {
     const paramNames = [];
     const paramPattern = /:(\w+)/g;
@@ -297,8 +232,7 @@ class AetherRouter extends EventEmitter {
     callback(router);
     
     router.staticRoutes.forEach((route, key) => this.staticRoutes.set(key, route));
-    const dLen = router.dynamicRoutes.length;
-    for (let i = 0; i < dLen; i++) this.dynamicRoutes.push(router.dynamicRoutes[i]);
+    for (let i = 0; i < router.dynamicRoutes.length; i++) this.dynamicRoutes.push(router.dynamicRoutes[i]);
     return this;
   }
 
@@ -309,23 +243,16 @@ class AetherRouter extends EventEmitter {
     callback(router);
     
     router.staticRoutes.forEach((route, key) => this.staticRoutes.set(key, route));
-    const dLen = router.dynamicRoutes.length;
-    for (let i = 0; i < dLen; i++) this.dynamicRoutes.push(router.dynamicRoutes[i]);
+    for (let i = 0; i < router.dynamicRoutes.length; i++) this.dynamicRoutes.push(router.dynamicRoutes[i]);
     return this;
   }
 
+  // [FIX] 重写了 use 方法，修复了 typeof args 永远为 'object' 的致命判断错误
   use(...args) {
     if (args.length === 0) return this;
 
-    // [FIX] Corrected typeof check. args is an array, so we must check args[0].
-    if (typeof args[0] === 'function' && typeof args[1] === 'string') {
-      const path = args[1];
-      const middlewares = [args[0], ...args.slice(2)];
-      args = [path, ...middlewares];
-    }
-
     if (typeof args[0] === 'string') {
-      const path = args[0]; 
+      const path = args[0];
       const middlewares = args.slice(1);
       
       for (let i = 0; i < middlewares.length; i++) {
@@ -346,14 +273,15 @@ class AetherRouter extends EventEmitter {
         wrappedMiddlewares[i] = async (ctx, next) => {
           if (!prefixRegex) return mw(ctx, next);
           const originalUrl = ctx.url;
-          const originalPath = ctx.path; 
+          const originalPath = ctx.path;
           if (prefixRegex.test(originalUrl)) {
             let newUrl = originalUrl.replace(prefixRegex, '');
-            if (newUrl.charCodeAt(0) !== 47) newUrl = '/' + newUrl; // 47 is '/'
+            if (newUrl.charCodeAt(0) !== 47) newUrl = '/' + newUrl;
             ctx.url = newUrl;
-            try { 
+            try {
+              // [FIX] 修复了 split('?') 返回数组导致 ctx.path 类型错误的问题
               if ('path' in ctx) ctx.path = newUrl.split('?')[0]; 
-              await mw(ctx, next); 
+              await mw(ctx, next);
             } finally {
               ctx.url = originalUrl;
               if ('path' in ctx) ctx.path = originalPath;
@@ -376,118 +304,91 @@ class AetherRouter extends EventEmitter {
     return this;
   }
 
-  /**
-   * [V8-OPT] The absolute hot path. 
-   * Optimized for monomorphic returns, zero-allocation parsing, and O(1) static lookups.
-   */
   match(method, url) {
-    // 1. Fast URL split (No regex, native indexOf)
     const qIndex = url.indexOf("?");
     const pathname = qIndex === -1 ? url : url.substring(0, qIndex);
     const search = qIndex === -1 ? null : url.substring(qIndex + 1);
     
-    const cacheKey = method + ":" + pathname; // String concat is heavily optimized in V8
-
-    // 2. Pure Cache Hit
+    const cacheKey = method + ":" + pathname;
     const cached = this.routeCache.get(cacheKey);
+    
     if (cached !== undefined) {
       const route = cached.route;
-      // [CRITICAL FIX] Never cache params for dynamic routes! Extract them on the fly to prevent cache poisoning.
       const params = route && !route.isStatic ? this._extractParams(route, pathname) : EMPTY_PARAMS;
-      
       return {
         route: route,
-        params: params || EMPTY_PARAMS,
+        params: params,
         query: search ? this.jitQueryParser.parse(search) : EMPTY_QUERY,
         handlers: cached.handlers
       };
     }
 
-    // 3. Collect middlewares (Pre-allocate array capacity hint via initial push)
     const applicableMiddlewares = [];
-    const gLen = this.globalMiddlewares.length;
-    for (let i = 0; i < gLen; i++) applicableMiddlewares.push(this.globalMiddlewares[i]);
+    for (let i = 0; i < this.globalMiddlewares.length; i++) applicableMiddlewares.push(this.globalMiddlewares[i]);
     
-    const pLen = this.prefixMiddlewares.length;
-    for (let i = 0; i < pLen; i++) {
+    for (let i = 0; i < this.prefixMiddlewares.length; i++) {
       const mw = this.prefixMiddlewares[i];
       const mwPath = mw.path;
       const mwPathSlash = mwPath.endsWith('/') ? mwPath : mwPath + '/';
       if (pathname === mwPath || pathname.startsWith(mwPathSlash)) {
-        const hLen = mw.handlers.length;
-        for (let j = 0; j < hLen; j++) applicableMiddlewares.push(mw.handlers[j]);
+        for (let j = 0; j < mw.handlers.length; j++) applicableMiddlewares.push(mw.handlers[j]);
       }
     }
 
     let matchedRoute = null;
+    matchedRoute = this.staticRoutes.get(method + ":" + pathname) || this.staticRoutes.get("ANY:" + pathname);
 
-    // 4. [V8-OPT] Static Route Fast-Path O(1) Lookup
-    matchedRoute = this.staticRoutes.get(method + ":" + pathname);
+    // [FIX] 修复了高并发下 _lastMatch 挂载在共享 route 对象上导致的“串参”竞态条件问题
+    let dynamicMatch = null; 
     if (!matchedRoute) {
-      matchedRoute = this.staticRoutes.get("ANY:" + pathname);
-    }
-
-    // 5. Fallback to Dynamic Routes (Regex)
-    if (!matchedRoute) {
-      const dLen = this.dynamicRoutes.length;
-      for (let i = 0; i < dLen; i++) {
+      for (let i = 0; i < this.dynamicRoutes.length; i++) {
         const route = this.dynamicRoutes[i];
         if (route.method !== null && route.method !== method) continue;
         
-        // [V8-OPT] RegExp.exec is slightly faster than String.match when we don't need the string context.
         const match = route.regex.exec(pathname);
         if (match) {
           matchedRoute = route;
-          // Temporarily store match result to avoid re-running regex in _extractParams
-          matchedRoute._lastMatch = match; 
+          dynamicMatch = match; // 使用局部变量保存匹配结果
           break;
         }
       }
     }
 
-    // 6. Build and Cache handler chain
     if (matchedRoute) {
       const finalHandlers = applicableMiddlewares.concat(matchedRoute.handlers);
-      
       if (this.routeCache.size >= this.cacheMaxSize) this.routeCache.clear();
-      // [CRITICAL FIX] Cache the route and handlers, NOT the extracted params.
       this.routeCache.set(cacheKey, { route: matchedRoute, handlers: finalHandlers });
 
-      const params = matchedRoute.isStatic ? EMPTY_PARAMS : this._extractParams(matchedRoute, pathname, matchedRoute._lastMatch);
-      return { 
-        route: matchedRoute, 
-        params: params, 
-        query: search ? this.jitQueryParser.parse(search) : EMPTY_QUERY, 
-        handlers: finalHandlers 
+      const params = matchedRoute.isStatic ? EMPTY_PARAMS : this._extractParams(matchedRoute, pathname, dynamicMatch);
+      return {
+        route: matchedRoute,
+        params: params,
+        query: search ? this.jitQueryParser.parse(search) : EMPTY_QUERY,
+        handlers: finalHandlers
       };
     }
     
     if (applicableMiddlewares.length > 0) {
       if (this.routeCache.size >= this.cacheMaxSize) this.routeCache.clear();
       this.routeCache.set(cacheKey, { route: null, handlers: applicableMiddlewares });
-      
-      return { 
-        route: null, 
-        params: EMPTY_PARAMS, 
-        query: search ? this.jitQueryParser.parse(search) : EMPTY_QUERY, 
-        handlers: applicableMiddlewares 
+      return {
+        route: null,
+        params: EMPTY_PARAMS,
+        query: search ? this.jitQueryParser.parse(search) : EMPTY_QUERY,
+        handlers: applicableMiddlewares
       };
     }
     
     return null;
   }
 
-  /**
-   * [V8-OPT] Fast param extraction using pre-compiled regex and indexed access.
-   */
   _extractParams(route, pathname, existingMatch) {
     const match = existingMatch || route.regex.exec(pathname);
     if (!match) return EMPTY_PARAMS;
     
     const params = {};
     const names = route.paramNames;
-    const len = names.length;
-    for (let i = 0; i < len; i++) {
+    for (let i = 0; i < names.length; i++) {
       params[names[i]] = match[i + 1];
     }
     return params;
@@ -501,17 +402,13 @@ class AetherRouter extends EventEmitter {
         context.params = match.params;
         context.route = match.route;
         
-        // [FIX] AetherContext defines 'query' as a getter-only property.
-        // Direct assignment (context.query = ...) throws a TypeError in strict mode.
-        // We must use the framework's setState() to update the underlying state safely.
         if (typeof context.setState === "function") {
           context.setState("query", match.query);
         } else {
-          try { context.query = match.query; } catch (e) { /* Ignore getter-only error */ }
+          try { context.query = match.query; } catch (e) { /* Ignore */ }
         }
         
         if (match.handlers && match.handlers.length > 0) {
-          // [V8-OPT] Fetch the optimal unrolled executor for the handler count
           const executor = this.jitExecutor.getExecutor(match.handlers);
           await executor.call(match.handlers, context);
         } else if (typeof next === "function") {
@@ -524,11 +421,7 @@ class AetherRouter extends EventEmitter {
       } else if (typeof next === "function") {
         await next();
       } else {
-        context.setStatus(404).json({ 
-          success: false, 
-          error: "Not Found", 
-          message: `Route ${context.method} ${context.url} not found` 
-        });
+        context.setStatus(404).json({ error: "Not Found" });
       }
     };
   }
@@ -536,8 +429,7 @@ class AetherRouter extends EventEmitter {
   getRoutes() {
     const routes = [];
     this.staticRoutes.forEach(r => routes.push({ method: r.method || "ALL", path: r.path, type: 'static' }));
-    const dLen = this.dynamicRoutes.length;
-    for (let i = 0; i < dLen; i++) {
+    for (let i = 0; i < this.dynamicRoutes.length; i++) {
       const r = this.dynamicRoutes[i];
       routes.push({ method: r.method || "ALL", path: r.path, type: 'dynamic' });
     }

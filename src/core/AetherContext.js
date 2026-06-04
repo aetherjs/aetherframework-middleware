@@ -1,58 +1,74 @@
- /**
+/**
  * @license MIT
  * Copyright (c) 2026-present AetherFramework Contributors.
  * SPDX-License-Identifier: MIT
  * @module @aetherframework/middleware/core/AetherContext
+ * 
+ * Ultra-Optimized Request Context for Maximum Performance
+ * Removed all statistics, metrics, and monitoring overhead
+ * Focus: Zero-allocation context management with minimal overhead
  */
-const GLOBAL_HEADER_BUFFER = new Array(64);
 
+/**
+ * AetherContext - High-performance request context optimized for V8
+ * Removed all statistics tracking and metrics collection
+ * Focus: Pure request/response handling with maximum speed
+ */
 class AetherContext {
   constructor(request, response) {
-    // 1. Strictly align with V8's Hidden Class (Shape) optimization
+    // ==========================================
+    // [V8-OPT] MONOMORPHIC PROPERTY LAYOUT
+    // ==========================================
+    // All properties initialized in same order for V8 Hidden Class optimization
     this._request = null;
     this._response = null;
-
+    
+    // Request metadata
     this.method = "";
     this.url = "";
     this.headers = null;
     this.path = "";
     this._queryString = "";
-
-    // 2. Avoid using Map/Set; use flat plain objects/arrays for custom response headers to achieve 5x faster R/W speeds.
+    
+    // [PERF] Flat header storage for O(1) access
     this._headersObj = {};
     this._headersCount = 0;
-    this._headersKeys = new Array(16); // Pre-allocated key tracking array
-
+    this._headersKeys = new Array(32); // Pre-allocated array to avoid resizing
+    
+    // Cached computations
     this._queryCache = null;
-    this._ipCache = null; // Lazy-evaluated cache
-
+    this._ipCache = null;
+    
+    // Response state
     this.statusCode = 200;
     this._body = null;
     this._terminated = false;
-
-    // 3. Use plain flat objects for business state/context storage, strictly avoiding Maps.
+    
+    // [PERF] State storage (removed metrics tracking)
     this._stateObj = {};
-
-    this._startTime = 0n;
-
+    
+    // Initialize if request/response provided
     if (request && response) {
       this._reset(request, response);
     }
   }
-
+  
   /**
-   * Ultra-fast context reset for pooling mechanisms (True Zero-Object-Allocation strategy)
+   * Reset context for reuse (object pooling)
+   * @param {Object} request - HTTP request object
+   * @param {Object} response - HTTP response object
    */
   _reset(request, response) {
     this._request = request;
     this._response = response;
-
+    
+    // [PERF] Direct property assignment (faster than Object.assign)
     this.method = request.method;
     const rawUrl = request.url || "/";
     this.url = rawUrl;
     this.headers = request.headers;
-
-    // Fast string slicing (bypassing expensive RegEx and URL instantiation overheads)
+    
+    // [PERF] Fast URL parsing without regex
     const qIdx = rawUrl.indexOf("?");
     if (qIdx !== -1) {
       this.path = rawUrl.substring(0, qIdx);
@@ -61,181 +77,293 @@ class AetherContext {
       this.path = rawUrl;
       this._queryString = "";
     }
-
-    // Only clear references, never use the 'new' keyword to re-allocate memory
+    
+    // Reset cached values
     this._queryCache = null;
     this._ipCache = null;
-
+    
+    // Reset response state
     this.statusCode = 200;
     this._body = null;
     this._terminated = false;
-
-    // Clean up custom headers object without breaking Hidden Classes or re-allocating memory
+    
+    // [PERF] Clear headers without re-allocating objects
     if (this._headersCount > 0) {
       for (let i = 0; i < this._headersCount; i++) {
         this._headersObj[this._headersKeys[i]] = undefined;
       }
       this._headersCount = 0;
     }
-
-    this._stateObj = {}; // Kept as empty object in most scenarios
-    this._startTime = process.hrtime.bigint();
+    
+    // [PERF] Clear state without re-allocating object
+    for (const key in this._stateObj) {
+      delete this._stateObj[key];
+    }
+    
+    // [PERF] REMOVED: _startTime and metrics tracking
+    // this._startTime = process.hrtime.bigint(); // Statistics removed
   }
-
-  // 🟢 Intercept the body property to establish the data pipeline
+  
+  // ==========================================
+  // [PERF] PROPERTY GETTERS/SETTERS
+  // ==========================================
+  
+  /**
+   * Get response body
+   */
   get body() {
     return this._body;
   }
+  
+  /**
+   * Set response body and finalize
+   * @param {any} value - Response body value
+   */
   set body(value) {
     if (this._terminated) return;
     this._body = value;
+    this._finalize();
   }
-
+  
   /**
-   * Lazy IP evaluation: Trigger C++ binding bridge only when business logic explicitly requests ctx.ip
+   * Get client IP address with caching
    */
   get ip() {
     if (this._ipCache) return this._ipCache;
+    
     const sock = this._request?.socket;
+    // [PERF] Simple IP extraction without proxy header checks
     return (this._ipCache = sock ? sock.remoteAddress : "127.0.0.1");
   }
-
+  
   /**
-   * Lazy Query parsing: Synchronous hand-optimized raw string scanner
+   * Get parsed query parameters with caching
    */
   get query() {
     if (this._queryCache) return this._queryCache;
     if (!this._queryString) return (this._queryCache = {});
-
+    
     const obj = {};
     const pairs = this._queryString.split("&");
+    
+    // [PERF] Manual parsing without try-catch for common case
     for (let i = 0; i < pairs.length; i++) {
       const pair = pairs[i];
       const eqIdx = pair.indexOf("=");
+      
       if (eqIdx !== -1) {
-        obj[pair.substring(0, eqIdx)] = pair.substring(eqIdx + 1);
+        // [PERF] Fast path: decode only when needed
+        const key = pair.substring(0, eqIdx);
+        const value = pair.substring(eqIdx + 1);
+        
+        // [PERF] Skip decodeURIComponent for simple ASCII
+        if (key.indexOf("%") === -1 && value.indexOf("%") === -1) {
+          obj[key] = value;
+        } else {
+          try {
+            obj[decodeURIComponent(key)] = decodeURIComponent(value);
+          } catch {
+            // Fallback for malformed URIs
+            obj[key] = value;
+          }
+        }
       } else {
-        obj[pair] = "";
+        // Key without value
+        const key = pair;
+        if (key.indexOf("%") === -1) {
+          obj[key] = "";
+        } else {
+          try {
+            obj[decodeURIComponent(key)] = "";
+          } catch {
+            obj[key] = "";
+          }
+        }
       }
     }
+    
     return (this._queryCache = obj);
   }
-
+  
+  // ==========================================
+  // [PERF] HEADER MANAGEMENT
+  // ==========================================
+  
+  /**
+   * Set response header
+   * @param {string} key - Header name
+   * @param {string} value - Header value
+   * @returns {AetherContext} - Chainable
+   */
   setHeader(key, value) {
     if (this._terminated) return this;
-
-    // Convention: High-performance middlewares should pass standard casing headers (e.g., 'Content-Type').
-    // We intentionally omit .toLowerCase() here to conserve CPU cycles.
-    if (this._headersObj[key] === undefined) {
-      this._headersKeys[this._headersCount++] = key;
+    
+    // [PERF] Lowercase for consistency with Node.js
+    const lowerKey = key.toLowerCase();
+    
+    // [PERF] Track header keys for fast iteration
+    if (this._headersObj[lowerKey] === undefined) {
+      if (this._headersCount < this._headersKeys.length) {
+        this._headersKeys[this._headersCount] = lowerKey;
+      } else {
+        this._headersKeys.push(lowerKey);
+      }
+      this._headersCount++;
     }
-    this._headersObj[key] = value;
+    
+    this._headersObj[lowerKey] = value;
     return this;
   }
-
+  
+  /**
+   * Get header value (request headers first, then response headers)
+   * @param {string} key - Header name
+   * @returns {string|null} - Header value or null
+   */
   getHeader(key) {
+    const lowerKey = key.toLowerCase();
     return (
-      this.headers[key] ||
-      this.headers[key.toLowerCase()] ||
-      this._headersObj[key] ||
+      this.headers?.[lowerKey] ||
+      this._headersObj[lowerKey] ||
       null
     );
   }
-
+  
+  // ==========================================
+  // [PERF] RESPONSE METHODS
+  // ==========================================
+  
+  /**
+   * Set HTTP status code
+   * @param {number} code - Status code
+   * @returns {AetherContext} - Chainable
+   */
   setStatus(code) {
     if (this._terminated) return this;
     this.statusCode = code;
     return this;
   }
-
+  
+  /**
+   * Send JSON response
+   * @param {any} data - Data to send as JSON
+   * @returns {AetherContext} - Chainable
+   */
   json(data) {
     if (this._terminated) return this;
-    // Direct assignment to prevent redundant lookup overheads
-    if (this._headersObj["Content-Type"] === undefined) {
-      this._headersKeys[this._headersCount++] = "Content-Type";
+    
+    this.setHeader("Content-Type", "application/json; charset=utf-8");
+    
+    // [PERF] Fast JSON stringification check
+    if (typeof data === "object") {
+      this._body = JSON.stringify(data);
+    } else {
+      this._body = String(data);
     }
-    this._headersObj["Content-Type"] = "application/json; charset=utf-8";
-    this._body = typeof data === "object" ? JSON.stringify(data) : data;
+    
     this._finalize();
     return this;
   }
-
+  
+  /**
+   * Send text response
+   * @param {string} data - Text to send
+   * @returns {AetherContext} - Chainable
+   */
   text(data) {
     if (this._terminated) return this;
-    if (this._headersObj["Content-Type"] === undefined) {
-      this._headersKeys[this._headersCount++] = "Content-Type";
-    }
-    this._headersObj["Content-Type"] = "text/plain; charset=utf-8";
+    
+    this.setHeader("Content-Type", "text/plain; charset=utf-8");
     this._body = String(data);
     this._finalize();
     return this;
   }
-
+  
+  /**
+   * Send raw response (no content-type header)
+   * @param {any} data - Raw data to send
+   * @returns {AetherContext} - Chainable
+   */
   raw(data) {
     if (this._terminated) return this;
     this._body = data;
     this._finalize();
     return this;
   }
-
+  
+  // ==========================================
+  // [PERF] STATE MANAGEMENT
+  // ==========================================
+  
+  /**
+   * Set state value (for middleware communication)
+   * @param {string} key - State key
+   * @param {any} value - State value
+   * @returns {AetherContext} - Chainable
+   */
   setState(key, value) {
     this._stateObj[key] = value;
     return this;
   }
-
+  
+  /**
+   * Get state value
+   * @param {string} key - State key
+   * @returns {any} - State value
+   */
   getState(key) {
     return this._stateObj[key];
   }
-
+  
+  /**
+   * Check if response has been sent
+   * @returns {boolean} - True if terminated
+   */
   isTerminated() {
     return this._terminated;
   }
-
+  
+  // ==========================================
+  // [PERF] RESPONSE FINALIZATION
+  // ==========================================
+  
   /**
-   * Critical Performance Bottleneck Optimization: Flush data instantly via the shared buffer
+   * Finalize and send response
+   * @private
    */
   _finalize() {
     if (this._terminated) return;
     this._terminated = true;
-
+    
     const res = this._response;
-    const socket = res.socket;
-
-    if (socket) socket.cork();
-
-    // Core optimization: Reuse the pre-allocated flat array to eliminate transient garbage collection pressure
-    GLOBAL_HEADER_BUFFER[0] = "Connection";
-    GLOBAL_HEADER_BUFFER[1] = "keep-alive";
-    let cursor = 2;
-
+    if (!res || res.headersSent) return;
+    
+    // [PERF] Build headers object directly (faster than array manipulation)
+    const headers = {};
+    
+    // [PERF] Manual header iteration without Object.keys()
     for (let i = 0; i < this._headersCount; i++) {
       const key = this._headersKeys[i];
       const val = this._headersObj[key];
       if (val !== undefined) {
-        GLOBAL_HEADER_BUFFER[cursor++] = key;
-        GLOBAL_HEADER_BUFFER[cursor++] = val;
+        headers[key] = val;
       }
     }
-
-    // Slice the buffer and pass it directly to the native writeHead.
-    // Note: The slice size is highly predictable and short, allowing V8 to aggressively inline the operation.
-    res.writeHead(this.statusCode, GLOBAL_HEADER_BUFFER.slice(0, cursor));
-
+    
+    // [PERF] Set keep-alive header if not already set
+    if (!headers["connection"]) {
+      headers["connection"] = "keep-alive";
+    }
+    
+    // [PERF] Direct writeHead call without extra checks
+    res.writeHead(this.statusCode, headers);
+    
+    // [PERF] Direct end call (Node.js handles socket optimization internally)
     if (this._body !== null) {
       res.end(this._body);
     } else {
       res.end();
     }
-
-    if (socket) {
-      process.nextTick(() => socket.uncork());
-    }
-  }
-
-  getMetrics() {
-    return {
-      duration: Number(process.hrtime.bigint() - this._startTime) / 1e6,
-    };
   }
 }
 

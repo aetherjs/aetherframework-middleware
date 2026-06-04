@@ -312,8 +312,6 @@ app.use((ctx) => {
   }
 });
 
-// 预编译以获得最大性能
-app.precompile();
 
 // 启动服务器
 const PORT = process.env.PORT || 3000;
@@ -571,7 +569,6 @@ AetherPipeline - 主应用实例
 ```javascript
 const app = new AetherPipeline(options);
 app.use(middleware); // 添加中间件
-app.precompile(); // 优化执行
 app.handle(req, res); // 处理请求
 app.isDevelopment; // 检查环境
 ```

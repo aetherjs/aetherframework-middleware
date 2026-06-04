@@ -1,6 +1,6 @@
 {
    "name": "@aetherframework/middleware",
-   "version": "1.0.2",
+   "version": "1.0.4",
    "description": "Ultra-performance, framework-agnostic middleware system for Aether Framework",
    "main": "index.js",
    "type": "module",

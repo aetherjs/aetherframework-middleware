@@ -1,106 +1,125 @@
- /**
+/**
  * @license MIT
  * Copyright (c) 2026-present AetherFramework Contributors.
  * SPDX-License-Identifier: MIT
  * @module @aetherframework/middleware/core/AetherStore
+ * 
+ * Ultra-Optimized Memory Store with Zero Statistics Overhead
+ * Removed all monitoring, event emissions, and performance counters
+ * Focus: Pure storage operations with maximum speed
  */
-
-import { EventEmitter } from 'events';
 
 /**
- * Memory storage backend with LRU cache
+ * MemoryStore - High-performance in-memory storage with LRU eviction
+ * Removed all statistics, events, and monitoring for maximum speed
  */
-class MemoryStore extends EventEmitter {
+class MemoryStore {
     constructor(options = {}) {
-        super();
+        // [PERF] Direct property assignment for V8 optimization
         this.maxSize = options.maxSize || 10000;
-        this.ttl = options.ttl || 3600000; // 1 hour
-        this.store = new Map();
-        this.lru = []; // List of keys in access order
-        this.stats = {
-            hits: 0,
-            misses: 0,
-            sets: 0,
-            deletes: 0,
-            size: 0
-        };
+        this.ttl = options.ttl || 3600000; // 1 hour default TTL
         
-        // Start cleanup interval
+        // [PERF] Use Map for O(1) operations
+        this.store = new Map();
+        
+        // [PERF] Simple LRU tracking - array is faster than linked list for small sizes
+        this.lru = [];
+        
+        // [PERF] No EventEmitter inheritance - removed all event overhead
+        // [PERF] No statistics tracking - removed hits, misses, sets counters
+        
+        // [PERF] Cleanup interval with unref to prevent blocking shutdown
         this.cleanupInterval = setInterval(() => this._cleanup(), 60000).unref();
     }
     
+    /**
+     * Get value by key with LRU update
+     * @param {string} key - Storage key
+     * @returns {Promise<any>} - Stored value or null
+     */
     async get(key) {
         const entry = this.store.get(key);
         
-        if (!entry) {
-            this.stats.misses++;
-            return null;
-        }
+        // [PERF] Fast null check
+        if (!entry) return null;
         
-        // Check if expired
+        // [PERF] Check expiration without Date.now() call if no TTL
         if (entry.expires && Date.now() > entry.expires) {
+            // [PERF] Direct deletion without statistics
             this.store.delete(key);
             this._removeFromLRU(key);
-            this.stats.misses++;
             return null;
         }
         
-        // Update LRU
+        // [PERF] Update LRU position
         this._updateLRU(key);
-        this.stats.hits++;
         
         return entry.value;
     }
     
+    /**
+     * Set value with optional TTL
+     * @param {string} key - Storage key
+     * @param {any} value - Value to store
+     * @param {number} ttl - Time to live in milliseconds
+     * @returns {Promise<void>}
+     */
     async set(key, value, ttl = this.ttl) {
-        // If key exists, update LRU
+        // [PERF] Check if key exists for LRU update
         if (this.store.has(key)) {
             this._updateLRU(key);
         } else {
-            // Check capacity
+            // [PERF] Evict if at capacity
             if (this.store.size >= this.maxSize) {
                 this._evict();
             }
             this.lru.push(key);
         }
         
+        // [PERF] Calculate expiration only if TTL provided
         const expires = ttl ? Date.now() + ttl : null;
         
+        // [PERF] Store entry with minimal metadata
         this.store.set(key, {
             value,
             expires,
-            createdAt: Date.now(),
-            accessedAt: Date.now()
+            createdAt: Date.now()
         });
-        
-        this.stats.sets++;
-        this.stats.size = this.store.size;
-        
-        this.emit('set', { key, value });
     }
     
+    /**
+     * Delete key from store
+     * @param {string} key - Key to delete
+     * @returns {Promise<boolean>} - True if deleted, false if not found
+     */
     async delete(key) {
         const deleted = this.store.delete(key);
         if (deleted) {
             this._removeFromLRU(key);
-            this.stats.deletes++;
-            this.stats.size = this.store.size;
-            this.emit('delete', { key });
         }
         return deleted;
     }
     
+    /**
+     * Clear all stored data
+     * @returns {Promise<void>}
+     */
     async clear() {
         this.store.clear();
         this.lru = [];
-        this.stats = { hits: 0, misses: 0, sets: 0, deletes: 0, size: 0 };
-        this.emit('clear');
+        // [PERF] No statistics reset needed
     }
     
+    /**
+     * Check if key exists and is not expired
+     * @param {string} key - Key to check
+     * @returns {Promise<boolean>} - True if exists and valid
+     */
     async has(key) {
         const entry = this.store.get(key);
         if (!entry) return false;
         
+        // [PERF] Check expiration
         if (entry.expires && Date.now() > entry.expires) {
             this.store.delete(key);
             this._removeFromLRU(key);
@@ -111,35 +130,64 @@ class MemoryStore extends EventEmitter {
         return true;
     }
     
+    /**
+     * Get all keys in store (excluding expired)
+     * @returns {Promise<string[]>} - Array of keys
+     */
     async keys() {
-        return Array.from(this.store.keys());
-    }
-    
-    async size() {
-        return this.store.size;
+        const now = Date.now();
+        const validKeys = [];
+        
+        // [PERF] Manual iteration avoids Array.from overhead
+        for (const [key, entry] of this.store.entries()) {
+            if (!entry.expires || now <= entry.expires) {
+                validKeys.push(key);
+            }
+        }
+        
+        return validKeys;
     }
     
     /**
-     * Update LRU order
-     * @param {string} key 
+     * Get current store size (excluding expired entries)
+     * @returns {Promise<number>} - Number of valid entries
+     */
+    async size() {
+        // [PERF] Count only non-expired entries
+        if (this.ttl === 0) {
+            return this.store.size; // No expiration, all entries valid
+        }
+        
+        const now = Date.now();
+        let count = 0;
+        
+        for (const entry of this.store.values()) {
+            if (!entry.expires || now <= entry.expires) {
+                count++;
+            }
+        }
+        
+        return count;
+    }
+    
+    /**
+     * Update LRU order - move accessed key to end
+     * @param {string} key - Accessed key
+     * @private
      */
     _updateLRU(key) {
         const index = this.lru.indexOf(key);
         if (index > -1) {
+            // [PERF] Splice is faster than filter for single element removal
             this.lru.splice(index, 1);
         }
         this.lru.push(key);
-        
-        // Update accessed time
-        const entry = this.store.get(key);
-        if (entry) {
-            entry.accessedAt = Date.now();
-        }
     }
     
     /**
      * Remove key from LRU list
-     * @param {string} key 
+     * @param {string} key - Key to remove
+     * @private
      */
     _removeFromLRU(key) {
         const index = this.lru.indexOf(key);
@@ -149,44 +197,45 @@ class MemoryStore extends EventEmitter {
     }
     
     /**
-     * Evict least recently used item
+     * Evict least recently used item when at capacity
+     * @private
      */
     _evict() {
         if (this.lru.length === 0) return;
         
+        // [PERF] Shift is O(1) for array
         const oldestKey = this.lru.shift();
         this.store.delete(oldestKey);
-        this.stats.size = this.store.size;
-        this.emit('evict', { key: oldestKey });
+        // [PERF] No statistics update
     }
     
     /**
      * Cleanup expired items
+     * @private
      */
     _cleanup() {
         const now = Date.now();
-        const keysToDelete = [];
+        let deleted = false;
         
+        // [PERF] Iterate and collect expired keys
         for (const [key, entry] of this.store.entries()) {
             if (entry.expires && now > entry.expires) {
-                keysToDelete.push(key);
+                this.store.delete(key);
+                this._removeFromLRU(key);
+                deleted = true;
             }
         }
         
-        for (const key of keysToDelete) {
-            this.store.delete(key);
-            this._removeFromLRU(key);
-        }
-        
-        if (keysToDelete.length > 0) {
-            this.stats.size = this.store.size;
-            this.emit('cleanup', { count: keysToDelete.length });
-        }
+        // [PERF] No event emission or statistics update
     }
     
+    /**
+     * Destroy store and cleanup resources
+     */
     destroy() {
         clearInterval(this.cleanupInterval);
-        this.clear();
+        this.store.clear();
+        this.lru = [];
     }
 }
 
@@ -196,8 +245,6 @@ class MemoryStore extends EventEmitter {
  * @returns {MemoryStore} - Store instance
  */
 function createAetherStore(options = {}) {
-    // In a full implementation, this would switch between Memory, Redis, etc.
-    // For now, we return the high-performance MemoryStore
     return new MemoryStore(options);
 }
 

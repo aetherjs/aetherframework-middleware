@@ -327,8 +327,6 @@ app.use((ctx) => {
   }
 });
 
-// Pre-compile for maximum performance
-app.precompile();
 
 // Start server
 const PORT = process.env.PORT || 3000;
@@ -586,7 +584,6 @@ AetherPipeline - Main application instance
 ```javascript
 const app = new AetherPipeline(options);
 app.use(middleware);           // Add middleware
-app.precompile();              // Optimize execution
 app.handle(req, res);          // Process request
 app.isDevelopment;             // Check environment
 ```
