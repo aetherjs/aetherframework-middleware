@@ -8,47 +8,56 @@
 import { EventEmitter } from "events";
 
 /**
- * AetherRouter - High-performance routing system for AetherJS
- * Supports versioning, grouping, parameter parsing, and middleware chaining
+ * AetherRouter - V8-Optimized High-Performance Router.
+ * Philosophy: Flat arrays, simple loops, zero deep closures, native V8 optimizations.
  */
 class AetherRouter extends EventEmitter {
   constructor(options = {}) {
     super();
-    this.routes = new Map(); 
-    this.groups = new Map(); 
-    this.middlewares = []; 
+    
+    // [V8-OPT] Flat arrays for routes. V8 optimizes continuous memory arrays better than Maps.
+    this.staticRoutes = []; 
+    this.dynamicRoutes = []; 
+    
+    this.globalMiddlewares = [];
+    this.prefixMiddlewares = [];
+    
     this.prefix = options.prefix || ""; 
     this.version = options.version || ""; 
     
-    this.methods = [
-      "GET", "POST", "PUT", "DELETE", 
-      "PATCH", "OPTIONS", "HEAD", "ANY"
-    ];
+    // [V8-OPT] Pure Cache with batch eviction
+    this.routeCache = new Map();
+    this.cacheMaxSize = options.cacheMaxSize || 2000; 
     
+    this.methods = ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS", "HEAD", "ANY"];
     this.methods.forEach(method => {
       this[method.toLowerCase()] = this._createRouteHandler(method);
     });
-    
     this.all = this._createRouteHandler("ANY");
   }
 
   _createRouteHandler(method) {
     return (path, ...handlers) => {
-      if (handlers.length === 0) {
-        throw new Error(`Route ${method} ${path} must have at least one handler`);
-      }
+      if (handlers.length === 0) throw new Error(`Route ${method} ${path} must have at least one handler`);
       
       const fullPath = this._buildPath(path);
+      const isStatic = fullPath.indexOf(':') === -1 && fullPath.indexOf('*') === -1;
+      
       const route = {
         method: method === "ANY" ? null : method,
         path: fullPath,
+        isStatic,
         handlers: this._wrapHandlers(handlers),
-        regex: this._pathToRegex(fullPath),
-        paramNames: this._extractParamNames(fullPath)
+        regex: isStatic ? null : this._pathToRegex(fullPath),
+        paramNames: isStatic ? [] : this._extractParamNames(fullPath)
       };
       
-      const routeKey = `${method}:${fullPath}`;
-      this.routes.set(routeKey, route);
+      // [V8-OPT] Push to flat arrays instead of Maps
+      if (isStatic) {
+        this.staticRoutes.push(route);
+      } else {
+        this.dynamicRoutes.push(route);
+      }
       
       this.emit("route:added", { method, path: fullPath, handlers: handlers.length });
       return this;
@@ -65,13 +74,11 @@ class AetherRouter extends EventEmitter {
 
   _pathToRegex(path) {
     const escapedPath = path.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&');
-    
     const pattern = escapedPath
       .replace(/\\:(\w+)/g, "(?<$1>[^/]+)") 
       .replace(/\\\*(\w+)?/g, (_, name) => name ? `(?<${name}>.*)` : "(.*)") 
       .replace(/\\\$([^)]+)\\\$/g, "(?:$1)") 
       .replace(/\\\?/g, "\\?"); 
-      
     return new RegExp(`^${pattern}$`);
   }
 
@@ -87,38 +94,39 @@ class AetherRouter extends EventEmitter {
 
   _wrapHandlers(handlers) {
     return handlers.map((handler, index) => {
-      if (typeof handler !== "function") {
-        throw new TypeError(`Route handler must be a function, got ${typeof handler} at position ${index}`);
-      }
+      if (typeof handler !== "function") throw new TypeError(`Route handler must be a function, got ${typeof handler} at position ${index}`);
       return handler;
     });
   }
 
   group(prefix, callback) {
-    const router = new AetherRouter({
-      prefix: `${this.prefix}/${prefix}`.replace(/\/+/g, "/"),
-      version: this.version
-    });
-    router.middlewares = [...this.middlewares];
+    const router = new AetherRouter({ prefix: `${this.prefix}/${prefix}`.replace(/\/+/g, "/"), version: this.version });
+    router.globalMiddlewares = [...this.globalMiddlewares];
+    router.prefixMiddlewares = [...this.prefixMiddlewares];
     callback(router);
-    router.routes.forEach((route, key) => this.routes.set(key, route));
+    this.staticRoutes.push(...router.staticRoutes);
+    this.dynamicRoutes.push(...router.dynamicRoutes);
     return this;
   }
 
   version(version, callback) {
     const router = new AetherRouter({ prefix: this.prefix, version: version });
-    router.middlewares = [...this.middlewares];
+    router.globalMiddlewares = [...this.globalMiddlewares];
+    router.prefixMiddlewares = [...this.prefixMiddlewares];
     callback(router);
-    router.routes.forEach((route, key) => this.routes.set(key, route));
+    this.staticRoutes.push(...router.staticRoutes);
+    this.dynamicRoutes.push(...router.dynamicRoutes);
     return this;
   }
 
-  /**
-   * Add middleware to router
-   * 
-   */
   use(...args) {
     if (args.length === 0) return this;
+
+    if (typeof args[0] === 'function' && typeof args[1] === 'string') {
+      const path = args[1];
+      const middlewares = [args[0], ...args.slice(2)];
+      args = [path, ...middlewares];
+    }
 
     if (typeof args[0] === 'string') {
       const path = args[0]; 
@@ -126,135 +134,162 @@ class AetherRouter extends EventEmitter {
       
       middlewares.forEach((middleware, index) => {
         if (typeof middleware !== "function") {
-          throw new TypeError(`Middleware for path "${path}" must be a function, got ${typeof middleware}`);
+          if (middleware && typeof middleware.middleware === 'function') middlewares[index] = middleware.middleware();
+          else throw new TypeError(`Middleware for path "${path}" must be a function, got ${typeof middleware}`);
         }
       });
       
-   
       const normalizedPath = path === '/' ? '/' : path.replace(/\/+$/, '');
-      
+      const escapedPath = normalizedPath.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&');
+      const prefixRegex = normalizedPath === '/' ? null : new RegExp(`^${escapedPath}(?=/|$|\\?)`, 'i');
       
       const wrappedMiddlewares = middlewares.map(mw => {
         return async (ctx, next) => {
-          if (normalizedPath === '/') {
-            return mw(ctx, next);
-          }
-
+          if (!prefixRegex) return mw(ctx, next);
           const originalUrl = ctx.url;
           const originalPath = ctx.path; 
-          const escapedPath = normalizedPath.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&');
-          const prefixRegex = new RegExp(`^${escapedPath}(?=/|$|\\?)`, 'i');
-
           if (prefixRegex.test(originalUrl)) {
             let newUrl = originalUrl.replace(prefixRegex, '');
             if (!newUrl.startsWith('/')) newUrl = '/' + newUrl;
-            
-
             ctx.url = newUrl;
             try { if ('path' in ctx) ctx.path = newUrl.split('?')[0]; } catch(e) {}
-            
-            try {
-              await mw(ctx, next);
-            } finally {
+            try { await mw(ctx, next); } finally {
               ctx.url = originalUrl;
               try { if ('path' in ctx) ctx.path = originalPath; } catch(e) {}
             }
-          } else {
-            await mw(ctx, next);
-          }
+          } else { await next(); }
         };
       });
 
-      this.middlewares.push({ path: normalizedPath, handlers: wrappedMiddlewares });
+      if (normalizedPath === '/') {
+        this.globalMiddlewares.push(...wrappedMiddlewares);
+      } else {
+        this.prefixMiddlewares.push({ path: normalizedPath, handlers: wrappedMiddlewares });
+      }
     } else {
-
       args.forEach((middleware, index) => {
-        if (typeof middleware !== "function") {
-          throw new TypeError(`Global middleware must be a function, got ${typeof middleware}`);
-        }
+        if (typeof middleware !== "function") throw new TypeError(`Global middleware must be a function, got ${typeof middleware}`);
       });
-      
-      this.middlewares.push({ path: '/', handlers: args });
+      this.globalMiddlewares.push(...args);
     }
-    
     return this;
   }
 
   /**
-   * Match route for incoming request
+   * [V8-OPT] Flat array iteration, simple string matching, native split.
    */
   match(method, url) {
-    const [pathname, search] = url.split("?");
-    const query = this._parseQuery(search);
+    // [V8-OPT] Native indexOf is faster than custom state machines for simple splits
+    const qIndex = url.indexOf("?");
+    const pathname = qIndex === -1 ? url : url.substring(0, qIndex);
+    const search = qIndex === -1 ? null : url.substring(qIndex + 1);
     
+    const cacheKey = `${method}:${pathname}`;
+
+    // 1. Pure Cache Hit
+    const cached = this.routeCache.get(cacheKey);
+    if (cached !== undefined) {
+      return {
+        route: cached.route,
+        params: cached.params,
+        query: this._parseQuery(search),
+        handlers: cached.handlers // Return flat array, let executor handle it
+      };
+    }
+
+    // 2. Collect middlewares (Pre-allocate array size for V8 optimization)
     const applicableMiddlewares = [];
+    const gLen = this.globalMiddlewares.length;
+    for (let i = 0; i < gLen; i++) applicableMiddlewares.push(this.globalMiddlewares[i]);
     
- 
-    this.middlewares.forEach(mw => {
-      if (typeof mw === 'function') {
-        applicableMiddlewares.push(mw);
-      } else if (mw && typeof mw === 'object' && mw.path) {
-        const mwPath = mw.path === '/' ? '/' : (mw.path.endsWith('/') ? mw.path : mw.path + '/');
-        if (pathname === mw.path || pathname.startsWith(mwPath)) {
-          applicableMiddlewares.push(...mw.handlers);
-        }
-      }
-    });
-    
-   
-    for (const [routeKey, route] of this.routes) {
-      const [routeMethod, routePath] = routeKey.split(":");
-      
-      if (routeMethod !== "ANY" && routeMethod !== method) continue;
-      
-      const match = pathname.match(route.regex);
-      if (match) {
-        const params = {};
-        if (match.groups) Object.assign(params, match.groups);
-        
-        route.paramNames.forEach((name, index) => {
-          if (!params[name] && match[index + 1]) params[name] = match[index + 1];
-        });
-        
-        const allHandlers = [...applicableMiddlewares, ...route.handlers];
-        return {
-          route,
-          params,
-          query,
-          handlers: allHandlers.filter(h => typeof h === "function")
-        };
+    const pLen = this.prefixMiddlewares.length;
+    for (let i = 0; i < pLen; i++) {
+      const mw = this.prefixMiddlewares[i];
+      const mwPath = mw.path.endsWith('/') ? mw.path : mw.path + '/';
+      if (pathname === mw.path || pathname.startsWith(mwPath)) {
+        const hLen = mw.handlers.length;
+        for (let j = 0; j < hLen; j++) applicableMiddlewares.push(mw.handlers[j]);
       }
     }
+
+    let matchedRoute = null;
+    let params = {};
+
+    // 3. [V8-OPT] Static Route Fast-Path (Simple === comparison, NO REGEX, NO MAP)
+    const sLen = this.staticRoutes.length;
+    for (let i = 0; i < sLen; i++) {
+      const route = this.staticRoutes[i];
+      if ((route.method === method || route.method === null) && route.path === pathname) {
+        matchedRoute = route;
+        break;
+      }
+    }
+
+    // 4. Fallback to Dynamic Routes (Regex)
+    if (!matchedRoute) {
+      const dLen = this.dynamicRoutes.length;
+      for (let i = 0; i < dLen; i++) {
+        const route = this.dynamicRoutes[i];
+        if (route.method !== null && route.method !== method) continue;
+        
+        const match = pathname.match(route.regex);
+        if (match) {
+          matchedRoute = route;
+          if (match.groups) Object.assign(params, match.groups);
+          const pnLen = route.paramNames.length;
+          for (let j = 0; j < pnLen; j++) {
+            const name = route.paramNames[j];
+            if (!params[name] && match[j + 1]) params[name] = match[j + 1];
+          }
+          break;
+        }
+      }
+    }
+
+    // 5. Build and Cache handler chain
+    if (matchedRoute) {
+      // [V8-OPT] Concat is highly optimized in V8 for flat arrays
+      const finalHandlers = applicableMiddlewares.concat(matchedRoute.handlers);
+      
+      if (this.routeCache.size >= this.cacheMaxSize) this.routeCache.clear();
+      this.routeCache.set(cacheKey, { route: matchedRoute, params, handlers: finalHandlers });
+
+      return { route: matchedRoute, params, query: this._parseQuery(search), handlers: finalHandlers };
+    }
     
- 
     if (applicableMiddlewares.length > 0) {
-      return {
-        route: null,
-        params: {},
-        query,
-        handlers: applicableMiddlewares.filter(h => typeof h === "function")
-      };
+      if (this.routeCache.size >= this.cacheMaxSize) this.routeCache.clear();
+      this.routeCache.set(cacheKey, { route: null, params: {}, handlers: applicableMiddlewares });
+      return { route: null, params: {}, query: this._parseQuery(search), handlers: applicableMiddlewares };
     }
     
     return null;
   }
 
+  /**
+   * [V8-OPT] Reverted to native split. V8's C++ implementation of split 
+   * is vastly faster than any JS-level charCodeAt state machine.
+   */
   _parseQuery(search) {
     const query = {};
     if (!search) return query;
     const pairs = search.split("&");
-    for (const pair of pairs) {
-      const [key, value] = pair.split("=");
-      if (key) {
-        const decodedKey = decodeURIComponent(key);
-        const decodedValue = value ? decodeURIComponent(value) : "";
-        if (decodedKey.endsWith("[]")) {
-          const arrayKey = decodedKey.slice(0, -2);
+    const len = pairs.length;
+    for (let i = 0; i < len; i++) {
+      const pair = pairs[i];
+      const eqIndex = pair.indexOf("=");
+      if (eqIndex !== -1) {
+        const key = decodeURIComponent(pair.substring(0, eqIndex));
+        const value = decodeURIComponent(pair.substring(eqIndex + 1));
+        if (key.endsWith("[]")) {
+          const arrayKey = key.slice(0, -2);
           if (!query[arrayKey]) query[arrayKey] = [];
-          query[arrayKey].push(decodedValue);
+          query[arrayKey].push(value);
         } else {
-          query[decodedKey] = decodedValue;
+          query[key] = value;
         }
+      } else if (pair) {
+        query[decodeURIComponent(pair)] = "";
       }
     }
     return query;
@@ -269,12 +304,11 @@ class AetherRouter extends EventEmitter {
         context.setState("query", match.query); 
         context.route = match.route;
         
-        if (!match.handlers || !Array.isArray(match.handlers) || match.handlers.length === 0) {
-           if (typeof next === "function") await next();
-           return;
+        if (match.handlers && match.handlers.length > 0) {
+          await this._executeHandlers(context, match.handlers);
+        } else if (typeof next === "function") {
+          await next();
         }
-        
-        await this._executeHandlers(context, match.handlers);
         
         if (!context.isTerminated() && !match.route && typeof next === "function") {
             await next();
@@ -282,57 +316,49 @@ class AetherRouter extends EventEmitter {
       } else if (typeof next === "function") {
         await next();
       } else {
-        context.setStatus(404).json({
-          success: false,
-          error: "Not Found",
-          message: `Route ${context.method} ${context.url} not found`,
-          timestamp: new Date().toISOString()
-        });
+        context.setStatus(404).json({ success: false, error: "Not Found", message: `Route ${context.method} ${context.url} not found` });
       }
     };
   }
 
+  /**
+   * [V8-OPT] Simple while-loop executor. 
+   * V8 JIT compiles simple loops much better than recursive compose closures.
+   */
   async _executeHandlers(context, handlers) {
     let index = 0;
+    const len = handlers.length;
+    
     const executeNext = async () => {
-      if (index >= handlers.length || context.isTerminated()) return;
+      if (index >= len || context.isTerminated()) return;
       const handler = handlers[index++];
-      
-      if (typeof handler !== "function") {
-        if (index < handlers.length) await executeNext();
-        return;
-      }
       
       try {
         await handler(context, executeNext);
       } catch (error) {
-        console.error(`[AetherRouter Error] Handler execution failed:`, error);
+        console.error(`[AetherRouter Error]`, error);
         if (!context.isTerminated()) {
-            context.setStatus(500).json({
-              success: false,
-              error: "Internal Server Error",
-              message: error.message,
-              timestamp: new Date().toISOString()
-            });
+            context.setStatus(500).json({ success: false, error: "Internal Server Error", message: error.message });
         }
       }
     };
+    
     await executeNext();
   }
 
   getRoutes() {
     const routes = [];
-    this.routes.forEach((route, key) => {
-      const [method, path] = key.split(":");
-      routes.push({ method: method === "ANY" ? "ALL" : method, path, handlers: route.handlers.length });
-    });
+    this.staticRoutes.forEach(r => routes.push({ method: r.method || "ALL", path: r.path, type: 'static' }));
+    this.dynamicRoutes.forEach(r => routes.push({ method: r.method || "ALL", path: r.path, type: 'dynamic' }));
     return routes;
   }
 
   clear() {
-    this.routes.clear();
-    this.groups.clear();
-    this.middlewares = [];
+    this.staticRoutes = [];
+    this.dynamicRoutes = [];
+    this.globalMiddlewares = [];
+    this.prefixMiddlewares = [];
+    this.routeCache.clear();
     return this;
   }
 }
