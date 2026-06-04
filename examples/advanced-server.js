@@ -248,8 +248,6 @@ pipeline.use((ctx) => {
   if (typeof ctx.terminate === "function") ctx.terminate();
 });
 
-// 15. Precompile for optimization
-pipeline.precompile();
 
 // 16. Create HTTP server
 const server = http.createServer(async (req, res) => {

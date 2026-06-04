@@ -105,8 +105,6 @@ pipeline.use((ctx) => {
   });
 });
 
-// 7. Precompile for optimization
-pipeline.precompile();
 
 // 8. Create HTTP server
 const server = http.createServer(async (req, res) => {
