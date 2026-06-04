@@ -1,374 +1,369 @@
- /**
+/**
  * @license MIT
  * Copyright (c) 2026-present AetherFramework Contributors.
  * SPDX-License-Identifier: MIT
  * @module @aetherframework/middleware/core/AetherPipeline
  */
+
 import { EventEmitter } from "events";
 import AetherContext from "./AetherContext.js";
 
+// ==========================================
+// [V8-OPT] PRE-ALLOCATED STATIC BUFFERS
+// ==========================================
 const STATIC_RESPONSES = new Map([
-  [200, Buffer.from(JSON.stringify({ status: "ok" }))],
-  [404, Buffer.from(JSON.stringify({ error: "Not Found" }))],
-  [500, Buffer.from(JSON.stringify({ error: "Internal Server Error" }))],
+  [200, Buffer.from('{"status":"ok"}')],
+  [404, Buffer.from('{"error":"Not Found"}')],
+  [500, Buffer.from('{"error":"Internal Server Error"}')],
 ]);
 
-const CONTEXT_POOL = [];
-const IN_POOL_CHECK = new Set(); 
-const CONTEXT_POOL_SIZE = 4096;
+// ==========================================
+// [V8-OPT] O(1) HIGH-PERFORMANCE CACHE
+// ==========================================
+class FastCache {
+  constructor(maxSize = 2000) {
+    this.maxSize = maxSize;
+    this.cache = new Map();
+  }
 
+  get(key) {
+    return this.cache.get(key);
+  }
+
+  set(key, value) {
+    if (this.cache.size >= this.maxSize) {
+      const firstKey = this.cache.keys().next().value;
+      if (firstKey) this.cache.delete(firstKey);
+    }
+    this.cache.set(key, value);
+  }
+
+  clear() {
+    this.cache.clear();
+  }
+
+  get size() { return this.cache.size; }
+}
+
+// ==========================================
+// [V8-OPT] LOCK-FREE CONTEXT POOL
+// ==========================================
+class ContextPool {
+  constructor(size = 8192) {
+    this.pool = new Array(size);
+    this.index = size; 
+    
+    for (let i = 0; i < size; i++) {
+      const ctx = new AetherContext(null, null);
+      ctx._inPool = true; 
+      this.pool[i] = ctx;
+    }
+  }
+
+  get(req, res) {
+    let ctx;
+    if (this.index > 0) {
+      ctx = this.pool[--this.index];
+    } else {
+      ctx = new AetherContext(null, null);
+      ctx._inPool = false;
+    }
+    
+    // [FIX] Call _reset WITH arguments when ACQUIRING
+    if (typeof ctx._reset === 'function') {
+      ctx._reset(req, res);
+    } else {
+      ctx.req = req;
+      ctx.res = res;
+      ctx.statusCode = 200;
+      ctx._terminated = false;
+    }
+    
+    ctx._inPool = false;
+    return ctx;
+  }
+
+  release(ctx) {
+    if (!ctx || ctx._inPool) return; 
+    
+    if (this.index < this.pool.length) {
+      ctx.req = null;
+      ctx.res = null;
+      ctx._body = null;
+      ctx._queryCache = null;
+      ctx._ipCache = null;
+      ctx.statusCode = 200;
+      ctx._terminated = false;
+      ctx.params = null;
+      ctx.route = null;
+      
+      // [V8-OPT] Clear headers without breaking Hidden Class
+      if (ctx._headersCount > 0) {
+        for (let i = 0; i < ctx._headersCount; i++) {
+          ctx._headersObj[ctx._headersKeys[i]] = undefined;
+        }
+        ctx._headersCount = 0;
+      } else if (ctx._headers) {
+        for (const key in ctx._headers) {
+          ctx._headers[key] = undefined;
+        }
+      }
+      
+      if (ctx._stateObj) {
+        for (const key in ctx._stateObj) {
+          ctx._stateObj[key] = undefined;
+        }
+      }
+
+      ctx._inPool = true;
+      this.pool[this.index++] = ctx;
+    }
+  }
+}
+
+const contextPool = new ContextPool(8192);
+
+// ==========================================
+// AETHER PIPELINE CORE
+// ==========================================
 class AetherPipeline extends EventEmitter {
   constructor() {
     super();
-    this._middlewares = [];
-    this._compiled = null;
-    this._compiledSync = null;
-    this._cache = new Map();
-    this._cacheMaxSize = 1000;
-    this.enableMetrics = false;
-
-    this._stats = {
+    this.middlewares = [];
+    this.cache = new FastCache(2000);
+    this._compiledChain = null;
+    
+    this.stats = {
       totalRequests: 0,
-      averageLatency: 0,
-      errorCount: 0,
       cacheHits: 0,
       cacheMisses: 0,
-      poolHits: 0,
-      poolMisses: 0,
     };
-
-    this._initObjectPools();
-  }
-
-  _initObjectPools() {
-    for (let i = 0; i < CONTEXT_POOL_SIZE; i++) {
-      const ctx = new AetherContext(null, null);
-      CONTEXT_POOL.push(ctx);
-      IN_POOL_CHECK.add(ctx);
-    }
-  }
-
-  _getContext(request, response) {
-    if (CONTEXT_POOL.length > 0) {
-      const context = CONTEXT_POOL.pop();
-      IN_POOL_CHECK.delete(context);
-      context._reset(request, response);
-      if (this.enableMetrics) this._stats.poolHits++;
-      return context;
-    }
-    if (this.enableMetrics) this._stats.poolMisses++;
-    return new AetherContext(request, response);
-  }
-
-  _returnContext(context) {
-    if (!context || IN_POOL_CHECK.has(context)) return;
-
-    if (CONTEXT_POOL.length < CONTEXT_POOL_SIZE) {
-      context.req = null;
-      context.res = null;
-      context._body = null;
-
-      // Safely clean up Headers
-      if (context._headers && typeof context._headers.clear === "function") {
-        context._headers.clear();
-      } else {
-        context._headers = null;
-      }
-
-      CONTEXT_POOL.push(context);
-      IN_POOL_CHECK.add(context);
-    }
   }
 
   use(middleware) {
     if (typeof middleware !== "function") {
       throw new TypeError("Middleware must be a function");
     }
-    this._middlewares.push(middleware);
-    this._compiled = null;
-    this._compiledSync = null;
+    this.middlewares.push(middleware);
+    this._compiledChain = null; 
     return this;
   }
 
-  /**
-   *Core Control 1: Standard V8-level high-concurrency asynchronous onion model compiler
-   * Ensure perfect timing wait chain, absolutely prevent asynchronous middleware (like CORS/security headers) from experiencing asynchronous drift
-   */
-  compile() {
-    if (this._compiled) return this._compiled;
-    const middlewares = this._middlewares;
+  _compileChain() {
+    if (this._compiledChain) return this._compiledChain;
+    
+    const middlewares = this.middlewares;
     const len = middlewares.length;
-
-    this._compiled = async function executePipeline(context) {
+    
+    if (len === 0) {
+      this._compiledChain = async (ctx) => {};
+      return this._compiledChain;
+    }
+    
+    this._compiledChain = async function execute(ctx) {
       async function dispatch(i) {
-        // 1. Safety boundary check: If context is terminated or connection is disconnected, return directly
-        if (
-          context.isTerminated() ||
-          (context._response && context._response.writableEnded)
-        ) {
-          if (context._finalize) context._finalize();
-          return;
-        }
-
-        // 2. Pipeline end: Safely trigger final _finalize
+        if (ctx._terminated || (ctx.res && ctx.res.writableEnded)) return;
         if (i >= len) {
-          if (context._finalize) context._finalize();
+          if (typeof ctx._finalize === 'function') ctx._finalize();
           return;
         }
-
+        
         const mw = middlewares[i];
-
-        // 3. Strictly bind current middleware with next subsequent chain's asynchronous timing
-        await mw(context, function next() {
+        await mw(ctx, function next() {
           return dispatch(i + 1);
         });
       }
-
-      // 🚀 Start the first middleware and strictly wait for the entire chain lifecycle to end
+      
       await dispatch(0);
     };
-
-    return this._compiled;
-  }
-
-  _compileSync() {
-    if (this._compiledSync) return this._compiledSync;
-    const middlewares = this._middlewares;
-    const len = middlewares.length;
-
-    const allSync = middlewares.every((mw) => {
-      const funcStr = mw.toString();
-      return (
-        !funcStr.includes("async ") &&
-        !funcStr.includes(".then") &&
-        !funcStr.includes("await ")
-      );
-    });
-
-    if (!allSync) return null;
-
-    this._compiledSync = function executePipelineSync(context) {
-      for (let i = 0; i < len; i++) {
-        middlewares[i](context, () => {});
-        if (context.isTerminated() || context.res?.writableEnded) return;
-      }
-      if (context._finalize) context._finalize();
-    };
-
-    return this._compiledSync;
+    
+    return this._compiledChain;
   }
 
   async handle(request, response) {
-    this._stats.totalRequests++;
+    this.stats.totalRequests++;
     const url = request.url;
     const method = request.method;
 
-    // 1. Root high-speed channel (with fallback CORS headers)
-    if (method === "GET" && url === "/") {
-      const socket = response.socket;
-      if (socket) socket.cork();
-      response.writeHead(200, [
-        "Content-Type",
-        "application/json; charset=utf-8",
-        "Content-Length",
-        "15",
-        "Connection",
-        "keep-alive",
-        "Access-Control-Allow-Origin",
-        "*",
-      ]);
-      response.end(STATIC_RESPONSES.get(200));
-      if (socket) socket.uncork();
-      return { cacheHit: true, static: true };
+    // 1. [V8-OPT] Ultra-fast cache check
+    if (method === 'GET') {
+      const cached = this.cache.get(url);
+      if (cached) {
+        this.stats.cacheHits++;
+        const socket = response.socket;
+        if (socket && !socket.destroyed) {
+           socket.cork();
+           response.writeHead(cached.status, cached.headers);
+           response.end(cached.buffer);
+           socket.uncork();
+        }
+        return;
+      }
     }
+    
+    this.stats.cacheMisses++;
 
-    // 2. Cache route hit
-    let methodCache = this._cache.get(method);
-    if (!methodCache) {
-      methodCache = new Map();
-      this._cache.set(method, methodCache);
-    }
-    const cached = methodCache.get(url);
-
-    if (cached) {
-      if (this.enableMetrics) this._stats.cacheHits++;
-      const socket = response.socket;
-      if (socket) socket.cork();
-      response.writeHead(cached.status, cached.headers);
-      response.end(cached.buffer);
-      if (socket) socket.uncork();
-      return { cacheHit: true };
-    }
-
-    if (this.enableMetrics) this._stats.cacheMisses++;
-
-    // 3. Context construction and core scheduling
-    const context = this._getContext(request, response);
+    // 2. Get context from pool
+    const ctx = contextPool.get(request, response);
 
     try {
-      //Core Control 2: Prioritize reading cached synchronous pipeline to avoid frequent character scanning causing CPU spikes under high concurrency
-      const pipelineSync = this._compiledSync || this._compileSync();
+      // 3. Execute middleware chain
+      const chain = this._compileChain();
+      await chain(ctx);
 
-      if (pipelineSync) {
-        pipelineSync(context);
-      } else {
-        // Strictly lock asynchronous middleware timing
-        await this.compile()(context);
+      // 4. [CRITICAL FIX] Cache GET responses BEFORE checking writableEnded.
+      // If the router already sent the response, ctx._terminated is true,
+      // but ctx._body and ctx.statusCode still hold the data we need to cache!
+      if (method === 'GET' && ctx.statusCode === 200 && ctx._body) {
+        this._cacheResponse(url, ctx);
       }
 
-      // 4. Dynamically capture all response headers, merge and store in high-speed cache
-      if (method === "GET" && response && response.statusCode < 400) {
-        this._setResponseCache(methodCache, url, context, response);
+      // 5. Send response if not already sent by the middleware chain
+      if (!ctx._terminated && !response.headersSent) {
+        this._sendResponse(ctx);
       }
 
-      this._returnContext(context);
-      return { cacheHit: false };
     } catch (error) {
-      if (this.enableMetrics) this._stats.errorCount++;
-      try {
-        if (response && !response.headersSent) {
-          response.writeHead(500, [
-            "Content-Type",
-            "application/json; charset=utf-8",
-            "Access-Control-Allow-Origin",
-            "*",
-          ]);
-          response.end(STATIC_RESPONSES.get(500));
-        }
-      } catch (e) {}
-      if (context) this._returnContext(context);
-      throw error;
+      if (!response.headersSent) {
+        try {
+          const socket = response.socket;
+          if (socket && !socket.destroyed) {
+             socket.cork();
+             response.writeHead(500, [
+               "Content-Type", "application/json; charset=utf-8",
+               "Content-Length", String(STATIC_RESPONSES.get(500).length),
+               "Connection", "keep-alive"
+             ]);
+             response.end(STATIC_RESPONSES.get(500));
+             socket.uncork();
+          }
+        } catch (e) {}
+      }
+    } finally {
+      contextPool.release(ctx);
     }
   }
 
-  /**
-   *Core Control 3: Ultimate comprehensive defense extraction algorithm —— Intercept multi-source Headers without blind spots
-   */
-  _setResponseCache(methodCache, url, context, response) {
-    // Establish a standard flat array, native two-element storage format is most efficient
+  _sendResponse(ctx) {
+    const response = ctx.res;
+    if (!response || response.headersSent) return;
+
+    const statusCode = ctx.statusCode || 200;
+    let body = ctx._body;
+
     const rawHeaders = ["Connection", "keep-alive"];
     const lowerKeys = new Set(["connection"]);
 
-    // ==========================================
-    // Strategy A: Forcefully synchronously extract AetherContext's high-performance private storage
-    // ==========================================
-    if (context && context._headersCount > 0) {
-      for (let i = 0; i < context._headersCount; i++) {
-        const key = context._headersKeys[i];
-        const val = context._headersObj[key];
-        if (val !== undefined && key) {
-          const kLower = key.toLowerCase();
-          if (!lowerKeys.has(kLower)) {
-            rawHeaders.push(key, String(val));
-            lowerKeys.add(kLower);
-          }
+    if (ctx._headersCount > 0) {
+      for (let i = 0; i < ctx._headersCount; i++) {
+        const key = ctx._headersKeys[i];
+        const val = ctx._headersObj[key];
+        if (val !== undefined) {
+          rawHeaders.push(key, String(val));
+          lowerKeys.add(key.toLowerCase());
+        }
+      }
+    } else if (ctx._headers) {
+      for (const key in ctx._headers) {
+        const val = ctx._headers[key];
+        if (val !== undefined) {
+          rawHeaders.push(key, String(val));
+          lowerKeys.add(key.toLowerCase());
         }
       }
     }
 
-    // ==========================================
-    // Strategy B: Deep scan various non-standard Context properties that may evolve into generic dictionaries
-    // ==========================================
-    const potentialDicts = [
-      context?._headers,
-      context?.headers,
-      context?.res?.headers,
-    ];
-    for (const dict of potentialDicts) {
-      if (dict && typeof dict === "object" && !(dict instanceof Set)) {
-        for (const key in dict) {
-          if (Object.prototype.hasOwnProperty.call(dict, key)) {
-            const kLower = key.toLowerCase();
-            if (!lowerKeys.has(kLower) && dict[key] !== undefined) {
-              rawHeaders.push(key, String(dict[key]));
-              lowerKeys.add(kLower);
-            }
-          }
+    if (!lowerKeys.has("content-type")) {
+      rawHeaders.push("Content-Type", "application/json; charset=utf-8");
+    }
+
+    if (body !== undefined && body !== null) {
+      const bodyStr = typeof body === 'string' ? body : 
+                      Buffer.isBuffer(body) ? body : 
+                      JSON.stringify(body);
+                      
+      const bodyBuffer = Buffer.isBuffer(bodyStr) ? bodyStr : Buffer.from(bodyStr);
+      rawHeaders.push("Content-Length", String(bodyBuffer.length));
+      
+      const socket = response.socket;
+      if (socket) socket.cork();
+      response.writeHead(statusCode, rawHeaders);
+      response.end(bodyBuffer);
+      if (socket) socket.uncork();
+    } else {
+      rawHeaders.push("Content-Length", "0");
+      const socket = response.socket;
+      if (socket) socket.cork();
+      response.writeHead(statusCode, rawHeaders);
+      response.end();
+      if (socket) socket.uncork();
+    }
+
+    ctx._terminated = true;
+  }
+
+  _cacheResponse(url, ctx) {
+    let bodyBuffer;
+    const body = ctx._body;
+    
+    if (Buffer.isBuffer(body)) {
+      bodyBuffer = body;
+    } else if (typeof body === 'string') {
+      bodyBuffer = Buffer.from(body);
+    } else {
+      bodyBuffer = Buffer.from(JSON.stringify(body));
+    }
+
+    const rawHeaders = ["Connection", "keep-alive"];
+    const lowerKeys = new Set(["connection"]);
+
+    if (ctx._headersCount > 0) {
+      for (let i = 0; i < ctx._headersCount; i++) {
+        const key = ctx._headersKeys[i];
+        const val = ctx._headersObj[key];
+        if (val !== undefined) {
+          rawHeaders.push(key, String(val));
+          lowerKeys.add(key.toLowerCase());
+        }
+      }
+    } else if (ctx._headers) {
+       for (const key in ctx._headers) {
+        const val = ctx._headers[key];
+        if (val !== undefined) {
+          rawHeaders.push(key, String(val));
+          lowerKeys.add(key.toLowerCase());
         }
       }
     }
 
-    // ==========================================
-    // Strategy C: Ultimate gap filling: Synchronously capture Node.js native response's standard response headers (security upgraded version)
-    // ==========================================
-    if (response) {
-      // 1. Intercept standard getHeaders() - Standard entry point for most modern Node.js
-      if (typeof response.getHeaders === "function") {
-        const nodeHeaders = response.getHeaders();
-        if (nodeHeaders) {
-          for (const key in nodeHeaders) {
-            const kLower = key.toLowerCase();
-            if (!lowerKeys.has(kLower)) {
-              const val = nodeHeaders[key];
-              rawHeaders.push(
-                key,
-                Array.isArray(val) ? val.join(", ") : String(val),
-              );
-              lowerKeys.add(kLower);
-            }
-          }
-        }
-      }
-
-      // 2. Intercept standard getHeaderNames() - As standard supplement for HTTP/2 or special streaming protocols
-      if (typeof response.getHeaderNames === "function") {
-        const names = response.getHeaderNames();
-        if (Array.isArray(names)) {
-          for (const key of names) {
-            const kLower = key.toLowerCase();
-            if (!lowerKeys.has(kLower)) {
-              const val = response.getHeader(key);
-              if (val !== undefined && val !== null) {
-                rawHeaders.push(
-                  key,
-                  Array.isArray(val) ? val.join(", ") : String(val),
-                );
-                lowerKeys.add(kLower);
-              }
-            }
-          }
-        }
-      }
-
-      // 🟢 Removed response._headers detection code that would cause high-version Node.js crashes and deprecation warnings
+    if (!lowerKeys.has("content-type")) {
+      rawHeaders.push("Content-Type", "application/json; charset=utf-8");
     }
+    rawHeaders.push("Content-Length", String(bodyBuffer.length));
 
-    // ==========================================
-    // Strategy D: Extract Body and convert to high-speed persistent Buffer
-    // ==========================================
-    let body = context._body || "";
-    const buffer = Buffer.isBuffer(body)
-      ? body
-      : Buffer.from(typeof body === "string" ? body : JSON.stringify(body));
-
-    // Complete length header
-    if (!lowerKeys.has("content-length")) {
-      rawHeaders.push("Content-Length", String(buffer.length));
-    }
-
-    methodCache.set(url, {
+    this.cache.set(url, {
       headers: rawHeaders,
-      status: context.statusCode || response.statusCode || 200,
-      buffer,
-      timestamp: Date.now(),
+      status: ctx.statusCode || 200,
+      buffer: bodyBuffer
     });
-
-    if (methodCache.size > this._cacheMaxSize) {
-      const firstKey = methodCache.keys().next().value;
-      methodCache.delete(firstKey);
-    }
   }
 
   getStats() {
-    return { ...this._stats, poolSize: CONTEXT_POOL.length };
+    return {
+      ...this.stats,
+      cacheSize: this.cache.size,
+      middlewareCount: this.middlewares.length,
+      poolAvailable: contextPool.index,
+      poolTotal: contextPool.pool.length
+    };
   }
+
   clearCache() {
-    this._cache.clear();
+    this.cache.clear();
   }
-  precompile() {
-    this.compile();
-    this._compileSync();
-    return this;
+
+  useRouter(router) {
+    return this.use(router.middleware());
   }
 }
 
