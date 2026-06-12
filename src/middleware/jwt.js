@@ -61,9 +61,10 @@ function strToBuffer(str) {
  * @returns {string} Base64 string
  */
 function arrayBufferToBase64(buffer) {
+  // FIXED: Use ES Module compatible approach
   if (typeof Buffer !== "undefined") {
-    // Node.js environment
-    const Buffer = require("buffer").Buffer;
+    // Node.js environment - use global Buffer if available
+    // Note: In ES Modules, Buffer is available globally in Node.js
     return Buffer.from(buffer).toString("base64");
   } else {
     // Browser environment
@@ -82,9 +83,9 @@ function arrayBufferToBase64(buffer) {
  * @returns {Uint8Array} ArrayBuffer representation
  */
 function base64ToArrayBuffer(base64) {
+  // FIXED: Use ES Module compatible approach
   if (typeof Buffer !== "undefined") {
-    // Node.js environment
-    const Buffer = require("buffer").Buffer;
+    // Node.js environment - use global Buffer if available
     return new Uint8Array(Buffer.from(base64, "base64"));
   } else {
     // Browser environment
@@ -200,7 +201,7 @@ async function generateHmacSignature(algorithm, key, data) {
     const signature = await crypto.subtle.sign(algo.name, cryptoKey, dataBuf);
     return new Uint8Array(signature);
   } else if (typeof require !== "undefined") {
-    // Node.js environment with crypto module
+    // Node.js environment with crypto module (CommonJS)
     const crypto = require("crypto");
     const hmac = crypto.createHmac(algo.hash.toLowerCase().replace("-", ""), key);
     hmac.update(data);
@@ -238,7 +239,7 @@ async function verifyHmacSignature(algorithm, key, data, signature) {
     );
     return await crypto.subtle.verify(algo.name, cryptoKey, signature, dataBuf);
   } else if (typeof require !== "undefined") {
-    // Node.js environment with crypto module
+    // Node.js environment with crypto module (CommonJS)
     const crypto = require("crypto");
     const hmac = crypto.createHmac(algo.hash.toLowerCase().replace("-", ""), key);
     hmac.update(data);
@@ -252,7 +253,7 @@ async function verifyHmacSignature(algorithm, key, data, signature) {
     
     let result = 0;
     for (let i = 0; i < expected.length; i++) {
-      result |= expected[i]^ provided[i];
+      result |= expected[i] ^ provided[i];
     }
     return result === 0;
   } else {
@@ -306,7 +307,7 @@ async function generateAsymmetricSignature(algorithm, key, data) {
     );
     return new Uint8Array(signature);
   } else if (typeof require !== "undefined") {
-    // Node.js environment with crypto module
+    // Node.js environment with crypto module (CommonJS)
     const crypto = require("crypto");
     const sign = crypto.createSign(algo.hash.replace("SHA-", "RSA-SHA"));
     sign.update(data);
@@ -369,7 +370,7 @@ async function verifyAsymmetricSignature(algorithm, key, data, signature) {
       dataBuf
     );
   } else if (typeof require !== "undefined") {
-    // Node.js environment with crypto module
+    // Node.js environment with crypto module (CommonJS)
     const crypto = require("crypto");
     const verify = crypto.createVerify(algo.hash.replace("SHA-", "RSA-SHA"));
     verify.update(data);
@@ -485,8 +486,8 @@ async function jwtSign(payload, key, options = {}) {
     } else if (typeof expiresIn === "string") {
       const match = expiresIn.match(/^(\d+)([smhd])$/);
       if (match) {
-        const value = parseInt(match, 10);
-        const unit = match;
+        const value = parseInt(match[1], 10);
+        const unit = match[2];
         switch (unit) {
           case "s": seconds = value; break;
           case "m": seconds = value * 60; break;
@@ -632,9 +633,9 @@ function jwtDecode(token, options = {}) {
   try {
     const payload = JSON.parse(base64UrlDecode(payloadEncoded));
     return options.complete ? {
-      header: JSON.parse(base64UrlDecode(parts)),
+      header: JSON.parse(base64UrlDecode(parts[0])),
       payload,
-      signature: parts
+      signature: parts[2]
     } : payload;
   } catch (e) {
     throw new Error("Invalid token payload");
@@ -673,7 +674,7 @@ function createJwtMiddleware(options = {}) {
     publicKey: envConfig.publicKey,
     algorithms: parseAlgorithms(envConfig.algorithms),
     algorithm: envConfig.algorithms
-      ? parseAlgorithms(envConfig.algorithms)
+      ? parseAlgorithms(envConfig.algorithms)[0]
       : "HS256",
     audience: envConfig.audience,
     issuer: envConfig.issuer,
@@ -800,7 +801,7 @@ function createJwtMiddleware(options = {}) {
       throw new Error("Invalid token format");
     }
     
-    const header = JSON.parse(base64UrlDecode(parts));
+    const header = JSON.parse(base64UrlDecode(parts[0]));
     const algorithm = header.alg;
     const key = getVerificationKey(algorithm);
     
@@ -900,7 +901,7 @@ createJwtMiddleware.verify = async function (token, options = {}) {
     throw new Error("Invalid token format");
   }
   
-  const header = JSON.parse(base64UrlDecode(parts));
+  const header = JSON.parse(base64UrlDecode(parts[0]));
   const algorithm = header.alg;
   const algo = ALGORITHMS[algorithm];
   
